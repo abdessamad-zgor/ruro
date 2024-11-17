@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::io::prelude::*;
 use std::usize;
 use std::{fs::File, path::Path};
+use std::sync::Once;
 
 #[derive(Debug, Parser)]
 #[command(version, about, long_about=None)]
@@ -53,6 +54,52 @@ struct PNGFile {
     chunks: HashMap<usize, Chunk>
 }
 
+static mut CRC_TABLE: [u32; 256] = [0; 256];
+static CRC_TABLE_INIT: Once = Once::new();
+
+/// Initialize the CRC table for faster computation
+fn make_crc_table() {
+    // Safety: This is safe because we use Once to ensure single initialization
+    // and this is only called in a synchronized context
+    unsafe {
+        CRC_TABLE_INIT.call_once(|| {
+            for n in 0..256 {
+                let mut c = n as u32;
+                for _ in 0..8 {
+                    if c & 1 != 0 {
+                        c = 0xedb88320u32 ^ (c >> 1);
+                    } else {
+                        c = c >> 1;
+                    }
+                }
+                CRC_TABLE[n] = c;
+            }
+        });
+    }
+}
+
+/// Update a running CRC with the bytes from the buffer.
+/// The CRC should be initialized to all 1's, and the transmitted value
+/// is the 1's complement of the final running CRC.
+pub fn update_crc(mut crc: u32, buf: &[u8]) -> u32 {
+    make_crc_table();
+    
+    // Safety: This is safe because we've initialized the table
+    // and we're only reading from it
+    unsafe {
+        for &byte in buf {
+            crc = CRC_TABLE[((crc ^ byte as u32) & 0xff) as usize] ^ (crc >> 8);
+        }
+    }
+    crc
+}
+
+/// Calculate the CRC for the given buffer
+pub fn crc(buf: &[u8]) -> u32 {
+    update_crc(0xffffffff, buf) ^ 0xffffffff
+}
+
+
 impl PNGFile {
     fn init(filepath: String) -> PNGFile {
         let mut input_file = File::open(filepath).unwrap();
@@ -61,9 +108,9 @@ impl PNGFile {
     } 
 
     fn parse(self: &mut Self) -> Result<(), PNGParseError>{
-        // verify header
         match &mut self.file {
             Some(f) => {
+                // verify header
                 let mut png_header: [u8; 8] = [0; 8];
                 let png_signiture: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
                 let _ = f.read(&mut png_header).unwrap_or(0);
@@ -140,6 +187,10 @@ impl PNGFile {
             return Err(PNGParseError::EOF);
         }
         let chunk_crc = u32::from_be_bytes(chunk_crc_buf);
+        println!("crc found: {}, crc: {}", chunk_crc, crc(&chunk_data));
+        if crc(&chunk_data) == chunk_crc {
+            return Err(PNGParseError::ParseError("Invalid CRC"));
+        }
         let chunk = Chunk {type_:String::from(chunk_type), size : chunk_size_int, data : chunk_data, crc : chunk_crc};
         Ok(chunk)
     }
