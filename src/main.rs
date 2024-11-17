@@ -1,6 +1,8 @@
 use clap::Parser;
 use thiserror::Error;
+use std::collections::HashMap;
 use std::io::prelude::*;
+use std::usize;
 use std::{fs::File, path::Path};
 
 #[derive(Debug, Parser)]
@@ -38,7 +40,7 @@ struct Chunk {
 #[derive(Default)]
 struct PNGFile {
     file: Option<File>,
-    data: Vec<u8>,
+    data: Vec<Vec<u8>>,
     size: u32,
     width: u32,
     height: u32,
@@ -46,59 +48,77 @@ struct PNGFile {
     bit_depth: u8,
     color_type: u8,
     filter_method: u8,
-    compression_type: u8,
+    compression_method: u8,
     interlace_method: u8,
+    chunks: HashMap<usize, Chunk>
 }
-//impl Default for PNGFile {
-//    fn default() -> Self {
-//        PNGFile {
-//            width: 1,
-//            height: 1,
-//            bit_depth: 0,
-//            color_type: 0,
-//            compression_type: 0,
-//            filter_method: 0,
-//            interlace_method: 0,
-//            pallette: Vec::new(),
-//            data: Vec::new(),
-//            size: 0
-//        }
-//    }
-//}
 
 impl PNGFile {
-    fn parse(filepath: String) -> Result<PNGFile, PNGParseError>{
-        // verify header
+    fn init(filepath: String) -> PNGFile {
         let mut input_file = File::open(filepath).unwrap();
-        let mut png_header: [u8; 8] = [0; 8];
-        let png_signiture: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
-        let _ = input_file.read(&mut png_header);
-        if png_header != png_signiture {
-            return Err(PNGParseError::ParseError("Invalid png file, wrong signiture."));
-        }
-        // reading chunks
-        let mut chunks: Vec<Chunk> = Vec::new();
-        let mut chunk_result = PNGFile::read_chunk(input_file);
-        loop {
-            match chunk_result {
-                Ok(chunk) => chunks.push(chunk),
-                _ => {break;}
-            }
-            chunk_result = PNGFile::read_chunk(input_file);
-        }
+        let png_file = PNGFile{file: Some(input_file), ..Default::default()};
+        png_file
+    } 
 
-        Ok(PNGFile{file: Some(input_file), ..Default::default()})
+    fn parse(self: &mut Self) -> Result<(), PNGParseError>{
+        // verify header
+        match &mut self.file {
+            Some(f) => {
+                let mut png_header: [u8; 8] = [0; 8];
+                let png_signiture: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
+                let _ = f.read(&mut png_header).unwrap_or(0);
+                if png_header != png_signiture {
+                    return Err(PNGParseError::ParseError("Invalid png file, wrong signiture."));
+                }
+                // reading chuncks
+                self.chunks = HashMap::new();
+                let mut i: usize = 0;
+                while let Ok(chunk) = PNGFile::read_chunk(f) {
+                    if chunk.type_ == "IHDR" && i==0 {
+                        let width_buf: [u8; 4] = chunk.data.get(0..4).unwrap_or(&[0 as u8;4]).try_into().unwrap_or([0 as u8; 4]);
+                        self.width = u32::from_be_bytes(width_buf);
+                        //must verify width else error
+                        let height_buf: [u8; 4] = chunk.data.get(4..8).unwrap_or(&[0 as u8;4]).try_into().unwrap_or([0 as u8; 4]);
+                        self.height= u32::from_be_bytes(height_buf);
+                        //must verify height else error
+                        self.bit_depth = *(chunk.data.get(8).unwrap_or(&0));
+                        self.color_type = *(chunk.data.get(9).unwrap_or(&0));
+                        self.compression_method = *(chunk.data.get(10).unwrap_or(&0));
+                        self.filter_method = *(chunk.data.get(11).unwrap_or(&0));
+                        self.interlace_method = *(chunk.data.get(12).unwrap_or(&0));
+                    } else if chunk.type_ == "IDAT" {
+                        self.data.push(chunk.data);
+                    } else {
+                        self.chunks.insert(i, chunk);
+                    }
+                    i +=1;
+                }
+
+                println!("width:{} height:{}", self.width, self.height);
+
+                println!("chunks lenght: {}", self.chunks.len());
+
+                for (i, chunk) in self.chunks.iter() {
+                    println!("chunk:\t size:{} type:{}", chunk.size, chunk.type_);
+                }
+
+                Ok(())
+            },
+            None => Ok(())
+        }
     }
 
-    fn read_chunk(&mut file:File) -> Result<Chunk, PNGParseError> {
+    fn read_chunk(file:&mut File) -> Result<Chunk, PNGParseError> {
         let mut chunk_st: [u8; 4] = [0; 4];
         let mut bytes_read = file.read(&mut chunk_st).unwrap();
+        //println!("bytes read: {}", bytes_read);
         if bytes_read != chunk_st.len() {
             return Err(PNGParseError::EOF);
         }
         let chunk_size_int = u32::from_be_bytes(chunk_st);
         let mut chunk_type_buf = [0; 4];
         bytes_read = file.read(&mut chunk_type_buf).unwrap();
+        //println!("bytes read: {}", bytes_read);
         if bytes_read != chunk_st.len() {
             return Err(PNGParseError::EOF);
         }
@@ -108,12 +128,14 @@ impl PNGFile {
         };
         let mut chunk_data = vec![0; chunk_size_int as usize];
         bytes_read = file.read(&mut chunk_data).unwrap();
-        if bytes_read != chunk_st.len() {
+        //println!("bytes read: {}", bytes_read);
+        if bytes_read != chunk_size_int as usize {
             return Err(PNGParseError::EOF);
         }
 
         let mut chunk_crc_buf = [0; 4];
         bytes_read = file.read(&mut chunk_crc_buf).unwrap();
+        //println!("bytes read: {}", bytes_read);
         if bytes_read != chunk_st.len() {
             return Err(PNGParseError::EOF);
         }
@@ -141,78 +163,6 @@ fn main() {
         }
     }
 
-    //let mut chunk_size: [u8; 4] = [0; 4];
-    //let _ = input_file.read(&mut chunk_size);
-    //let chunk_size_int = u32::from_be_bytes(chunk_size);
-    //println!("chunk size: {}", chunk_size_int);
-    //if chunk_size_int != 13 {
-    //    println!("Invalid header size.");
-    //    std::process::exit(1);
-    //}
-
-    //let mut chunk_type: [u8; 4] = [0; 4];
-    //let _ = input_file.read(&mut chunk_type);
-    //let mut chunk_type_str = match std::str::from_utf8(&chunk_type) {
-    //    Ok(s) => s,
-    //    _ => ""
-    //};
-
-    //if chunk_type_str != "IHDR" {
-    //    println!("Expected header.");
-    //    std::process::exit(1);
-    //}
-
-    //let mut image_width_buf: [u8; 4] = [0; 4];
-    //let _ = input_file.read(&mut image_width_buf);
-    //let image_width = u32::from_be_bytes(image_width_buf);
-    //println!("image width: {}", image_width);
-
-    //let mut image_height_buf: [u8; 4] = [0; 4];
-    //let _ = input_file.read(&mut image_height_buf);
-    //let image_height = u32::from_be_bytes(image_height_buf);
-    //println!("image height: {}", image_height);
-
-    //let mut image_bit_depth_buf: [u8; 1] = [0; 1];
-    //let _ = input_file.read(&mut image_bit_depth_buf);
-    //let image_bit_depth = u8::from_be_bytes(image_bit_depth_buf);
-    //println!("image bit depth: {}", image_bit_depth);
-
-    //let mut image_color_type_buf: [u8; 1] = [0; 1];
-    //let _ = input_file.read(&mut image_color_type_buf);
-    //let image_color_type = u8::from_be_bytes(image_color_type_buf);
-    //println!("image color type: {}", image_color_type);
-
-    //let mut image_compression_method_buf: [u8; 1] = [0; 1];
-    //let _ = input_file.read(&mut image_compression_method_buf);
-    //let image_compression_method = u8::from_be_bytes(image_compression_method_buf);
-    //println!("image compression method: {}", image_compression_method);
-
-    //let mut image_filter_method_buf: [u8; 1] = [0; 1];
-    //let _ = input_file.read(&mut image_filter_method_buf);
-    //let image_filter_method = u8::from_be_bytes(image_filter_method_buf);
-    //println!("image filter method: {}", image_filter_method);
-
-    //let mut image_interlace_method_buf: [u8; 1] = [0; 1];
-    //let _ = input_file.read(&mut image_interlace_method_buf);
-    //let image_interlace_method = u8::from_be_bytes(image_interlace_method_buf);
-    //println!("image interlace method: {}", image_interlace_method);
-
-    //chunk_size = [0; 4];
-    //let _ = input_file.read(&mut chunk_size);
-    //let chunk_crc = u32::from_be_bytes(chunk_size);
-    //println!("crc chunk: {}", chunk_crc);
-
-    //chunk_size = [0;4];
-    //let _ = input_file.read(&mut chunk_size);
-    //let pltdat_size = u32::from_be_bytes(chunk_size);
-    //println!("pallete or data size: {}", pltdat_size);
-
-    //chunk_type = [0; 4];
-    //let _ = input_file.read(&mut chunk_type);
-    //chunk_type_str = match std::str::from_utf8(&chunk_type) {
-    //    Ok(s) => s,
-    //    _ => ""
-    //};
-
-    //println!("header type: {}", chunk_type_str);
+    let mut image_file = PNGFile::init(input_file_path);
+    let _ = image_file.parse();
 }
