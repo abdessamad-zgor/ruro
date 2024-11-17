@@ -1,10 +1,10 @@
 use clap::Parser;
-use thiserror::Error;
 use std::collections::HashMap;
 use std::io::prelude::*;
+use std::sync::Once;
 use std::usize;
 use std::{fs::File, path::Path};
-use std::sync::Once;
+use thiserror::Error;
 
 #[derive(Debug, Parser)]
 #[command(version, about, long_about=None)]
@@ -12,7 +12,7 @@ struct Args {
     #[arg(short, long)]
     input: String,
     #[arg(short, long, default_value_t=String::from("output.png"))]
-    output: String
+    output: String,
 }
 
 #[derive(Debug, Error)]
@@ -22,20 +22,20 @@ enum PNGParseError {
     #[error("Parse error: `{0}`.")]
     ParseError(&'static str),
     #[error("End of file error.")]
-    EOF
+    EOF,
 }
 
 struct RGB {
     r: u8,
     g: u8,
-    b: u8
+    b: u8,
 }
 
 struct Chunk {
     size: u32,
     type_: String,
     data: Vec<u8>,
-    crc: u32
+    crc: u32,
 }
 
 #[derive(Default)]
@@ -51,7 +51,7 @@ struct PNGFile {
     filter_method: u8,
     compression_method: u8,
     interlace_method: u8,
-    chunks: HashMap<usize, Chunk>
+    chunks: HashMap<usize, Chunk>,
 }
 
 static mut CRC_TABLE: [u32; 256] = [0; 256];
@@ -83,7 +83,7 @@ fn make_crc_table() {
 /// is the 1's complement of the final running CRC.
 pub fn update_crc(mut crc: u32, buf: &[u8]) -> u32 {
     make_crc_table();
-    
+
     // Safety: This is safe because we've initialized the table
     // and we're only reading from it
     unsafe {
@@ -99,15 +99,17 @@ pub fn crc(buf: &[u8]) -> u32 {
     update_crc(0xffffffff, buf) ^ 0xffffffff
 }
 
-
 impl PNGFile {
     fn init(filepath: String) -> PNGFile {
-        let mut input_file = File::open(filepath).unwrap();
-        let png_file = PNGFile{file: Some(input_file), ..Default::default()};
+        let input_file = File::open(filepath).unwrap();
+        let png_file = PNGFile {
+            file: Some(input_file),
+            ..Default::default()
+        };
         png_file
-    } 
+    }
 
-    fn parse(self: &mut Self) -> Result<(), PNGParseError>{
+    fn parse(self: &mut Self) -> Result<(), PNGParseError> {
         match &mut self.file {
             Some(f) => {
                 // verify header
@@ -115,18 +117,30 @@ impl PNGFile {
                 let png_signiture: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
                 let _ = f.read(&mut png_header).unwrap_or(0);
                 if png_header != png_signiture {
-                    return Err(PNGParseError::ParseError("Invalid png file, wrong signiture."));
+                    return Err(PNGParseError::ParseError(
+                        "Invalid png file, wrong signiture.",
+                    ));
                 }
                 // reading chuncks
                 self.chunks = HashMap::new();
                 let mut i: usize = 0;
                 while let Ok(chunk) = PNGFile::read_chunk(f) {
-                    if chunk.type_ == "IHDR" && i==0 {
-                        let width_buf: [u8; 4] = chunk.data.get(0..4).unwrap_or(&[0 as u8;4]).try_into().unwrap_or([0 as u8; 4]);
+                    if chunk.type_ == "IHDR" && i == 0 {
+                        let width_buf: [u8; 4] = chunk
+                            .data
+                            .get(0..4)
+                            .unwrap_or(&[0 as u8; 4])
+                            .try_into()
+                            .unwrap_or([0 as u8; 4]);
                         self.width = u32::from_be_bytes(width_buf);
                         //must verify width else error
-                        let height_buf: [u8; 4] = chunk.data.get(4..8).unwrap_or(&[0 as u8;4]).try_into().unwrap_or([0 as u8; 4]);
-                        self.height= u32::from_be_bytes(height_buf);
+                        let height_buf: [u8; 4] = chunk
+                            .data
+                            .get(4..8)
+                            .unwrap_or(&[0 as u8; 4])
+                            .try_into()
+                            .unwrap_or([0 as u8; 4]);
+                        self.height = u32::from_be_bytes(height_buf);
                         //must verify height else error
                         self.bit_depth = *(chunk.data.get(8).unwrap_or(&0));
                         self.color_type = *(chunk.data.get(9).unwrap_or(&0));
@@ -135,10 +149,20 @@ impl PNGFile {
                         self.interlace_method = *(chunk.data.get(12).unwrap_or(&0));
                     } else if chunk.type_ == "IDAT" {
                         self.data.push(chunk.data);
+                    } else if chunk.type_ == "PLTE" {
+                        for i in 0..chunk.data.len() {
+                            let rgb_bytes = &chunk.data[i..i + 3];
+                            let rgb_entry = RGB {
+                                r: rgb_bytes[0],
+                                g: rgb_bytes[1],
+                                b: rgb_bytes[2],
+                            };
+                            self.pallette.push(rgb_entry);
+                        }
                     } else {
                         self.chunks.insert(i, chunk);
                     }
-                    i +=1;
+                    i += 1;
                 }
 
                 println!("width:{} height:{}", self.width, self.height);
@@ -146,16 +170,19 @@ impl PNGFile {
                 println!("chunks lenght: {}", self.chunks.len());
 
                 for (i, chunk) in self.chunks.iter() {
-                    println!("chunk:\t size:{} type:{}", chunk.size, chunk.type_);
+                    println!(
+                        "chunk:\t index: {} size:{} type:{}",
+                        i, chunk.size, chunk.type_
+                    );
                 }
 
                 Ok(())
-            },
-            None => Ok(())
+            }
+            None => Ok(()),
         }
     }
 
-    fn read_chunk(file:&mut File) -> Result<Chunk, PNGParseError> {
+    fn read_chunk(file: &mut File) -> Result<Chunk, PNGParseError> {
         let mut chunk_st: [u8; 4] = [0; 4];
         let mut bytes_read = file.read(&mut chunk_st).unwrap();
         //println!("bytes read: {}", bytes_read);
@@ -170,8 +197,8 @@ impl PNGFile {
             return Err(PNGParseError::EOF);
         }
         let chunk_type = match std::str::from_utf8(&chunk_type_buf) {
-            Ok(s)=> s,
-            _ => ""
+            Ok(s) => s,
+            _ => "",
         };
         let mut chunk_data = vec![0; chunk_size_int as usize];
         bytes_read = file.read(&mut chunk_data).unwrap();
@@ -187,11 +214,19 @@ impl PNGFile {
             return Err(PNGParseError::EOF);
         }
         let chunk_crc = u32::from_be_bytes(chunk_crc_buf);
-        println!("crc found: {}, crc: {}", chunk_crc, crc(&chunk_data));
-        if crc(&chunk_data) == chunk_crc {
+
+        let mut crc_buffer: Vec<u8> = Vec::new();
+        crc_buffer.append(&mut chunk_type_buf.clone().to_vec());
+        crc_buffer.append(&mut chunk_data.clone().to_vec());
+        if crc(&crc_buffer) != chunk_crc {
             return Err(PNGParseError::ParseError("Invalid CRC"));
         }
-        let chunk = Chunk {type_:String::from(chunk_type), size : chunk_size_int, data : chunk_data, crc : chunk_crc};
+        let chunk = Chunk {
+            type_: String::from(chunk_type),
+            size: chunk_size_int,
+            data: chunk_data,
+            crc: chunk_crc,
+        };
         Ok(chunk)
     }
 }
@@ -200,15 +235,15 @@ fn main() {
     let args = Args::parse();
     let input_file_path = args.input;
     let file_segs: Vec<&str> = input_file_path.split(".").collect();
-    let file_ext = if file_segs.len() >=2 {
-        file_segs.get(file_segs.len()-1).unwrap()
+    let file_ext = if file_segs.len() >= 2 {
+        file_segs.get(file_segs.len() - 1).unwrap()
     } else {
         ""
     };
 
     // verify
     if Path::new(&input_file_path).exists() {
-        if file_ext!= "png" {
+        if file_ext != "png" {
             println!("Unrecognized file format, supported formats are: (png).");
             std::process::exit(1);
         }
