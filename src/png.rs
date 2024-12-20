@@ -4,6 +4,7 @@ use std::sync::Once;
 use std::usize;
 use std::{fs::File};
 use thiserror::Error;
+use flate2::read::{ZlibDecoder};
 
 #[derive(Debug, Error)]
 pub enum PNGParseError {
@@ -31,7 +32,7 @@ struct Chunk {
 #[derive(Default)]
 pub struct PNGFile {
     file: Option<File>,
-    data: Vec<Vec<u8>>,
+    data: Vec<u8>,
     size: u32,
     width: u32,
     height: u32,
@@ -111,6 +112,7 @@ impl PNGFile {
                         "Invalid png file, wrong signiture.",
                     ));
                 }
+                let mut data_chunks: Vec<u8> = vec![];
                 // reading chuncks
                 self.chunks = HashMap::new();
                 let mut i: usize = 0;
@@ -138,7 +140,9 @@ impl PNGFile {
                         self.filter_method = *(chunk.data.get(11).unwrap_or(&0));
                         self.interlace_method = *(chunk.data.get(12).unwrap_or(&0));
                     } else if chunk.type_ == "IDAT" {
-                        self.data.push(chunk.data);
+                        let mut data = chunk.data.clone();
+                        data_chunks.append(&mut data);
+                        assert!(data_chunks.len() > 0);
                     } else if chunk.type_ == "PLTE" {
                         for i in 0..chunk.data.len() {
                             let rgb_bytes = &chunk.data[i..i + 3];
@@ -149,13 +153,21 @@ impl PNGFile {
                             };
                             self.pallette.push(rgb_entry);
                         }
+                    } else if chunk.type_ == "IEND" {
+                        assert!(data_chunks.len() > 0);
+                        let mut dec = ZlibDecoder::new(&data_chunks[..]);
+                        let mut deflated_data: Vec<u8> = vec![];
+                        dec.read_to_end(&mut deflated_data).unwrap();
+                        assert!(deflated_data.len() > 0);
+                        self.data.append(&mut deflated_data);
                     } else {
                         self.chunks.insert(i, chunk);
                     }
                     i += 1;
                 }
 
-                println!("width:{} height:{}", self.width, self.height);
+                println!("width:{} height:{} bit_depth: {}", self.width, self.height, self.bit_depth);
+                println!("data: {}", self.data.len());
 
                 println!("chunks lenght: {}", self.chunks.len());
 
@@ -219,4 +231,5 @@ impl PNGFile {
         };
         Ok(chunk)
     }
+
 }
